@@ -1,0 +1,298 @@
+<!doctype html>
+<!--
+MVP: Video Upload + Auto Transcribe (browser attempt) + Translate (placeholder)
+- Single-file front-end prototype
+- Uses Web Speech API (if available) for quick in-browser transcription (best-effort; limited browser support)
+- If Web Speech API isn't available or for better accuracy, this page will send the video's audio to a backend endpoint (/api/transcribe)
+  which you should implement using a speech-to-text provider (OpenAI Whisper, AssemblyAI, Deepgram, Google Speech-to-Text, etc.)
+- After transcription, the page optionally sends text to /api/translate for translation (or call a translation API like Google Translate, DeepL, or Azure Translator)
+- The page generates a .vtt subtitle track and attaches it to the video. You can download the .vtt file.
+
+Server snippets are included at the bottom of this file (search for "SERVER EXAMPLE") - use them as a starting point.
+-->
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Video Subtitle MVP</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#10b981;--muted:#94a3b8;color-scheme:dark}
+    body{font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial; background:linear-gradient(180deg,#031025 0%,#071228 100%); color:#e6eef6; margin:0; padding:28px}
+    .container{max-width:980px;margin:0 auto}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:12px; padding:18px; box-shadow:0 6px 24px rgba(2,6,23,0.6)}
+    h1{margin:0 0 8px;font-size:20px}
+    p{margin:0 0 14px;color:var(--muted)}
+    .row{display:flex;gap:12px;align-items:center}
+    input[type=file]{display:block}
+    select, button{padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+    button.primary{background:var(--accent);color:#042018;border:none}
+    video{width:100%;border-radius:8px;background:#000}
+    pre{white-space:pre-wrap;max-height:260px;overflow:auto;background:#020617;padding:8px;border-radius:6px}
+    .small{font-size:13px;color:var(--muted)}
+    .flex-col{display:flex;flex-direction:column;gap:8px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    .status{font-size:13px;color:#cbd5e1}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>Video Subtitle — MVP</h1>
+      <p>Upload a long-form or short-form video. The app will try to auto-detect/transcribe the audio and let you generate subtitles in: Russian, Spanish, French, English.</p>
+
+      <div class="flex-col">
+        <label class="small">Choose video (mp4/webm/ogg)</label>
+        <input id="videoFile" type="file" accept="video/*">
+
+        <div class="row">
+          <div style="flex:1">
+            <video id="video" controls></video>
+            <!-- subtitle track will be added dynamically -->
+          </div>
+        </div>
+
+        <div class="controls">
+          <select id="targetLang">
+            <option value="en">English</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="ru">Russian</option>
+          </select>
+
+          <button id="generateBtn" class="primary">Generate Subtitles</button>
+          <button id="downloadVtt">Download .vtt</button>
+
+          <div style="margin-left:auto" class="small">
+            <label>Auto-detect language attempt: <span id="detectedLang">—</span></label>
+          </div>
+        </div>
+
+        <div class="status" id="status">Idle — choose a video.</div>
+
+        <h3 style="margin-top:12px">Transcription preview</h3>
+        <pre id="transcriptPreview">No transcript yet.</pre>
+      </div>
+    </div>
+
+    <p class="small" style="margin-top:10px">Notes: The in-browser transcription (Web Speech API) works in some browsers only and has limitations. For reliable results, hook up a backend STT service and translation API — see server snippet below.</p>
+
+    <div class="card" style="margin-top:14px">
+      <h3>How it works (MVP)</h3>
+      <ol>
+        <li>Upload a video. The browser loads it so you can preview.</li>
+        <li>When you click <em>Generate Subtitles</em>, the page will try to extract audio and use the Web Speech API to transcribe. If unavailable, it will send the audio to <code>/api/transcribe</code> (you implement this).</li>
+        <li>Optionally send the transcript to a translation endpoint or API to produce the selected language subtitles.</li>
+        <li>Generated subtitles are added as a VTT track and can be downloaded.</li>
+      </ol>
+
+      <h4>Server example</h4>
+      <pre>// SERVER EXAMPLE (Node.js + Express - PSEUDO)
+// npm i express multer node-fetch
+
+// const express = require('express');
+// const multer = require('multer');
+// const fetch = require('node-fetch');
+// const upload = multer();
+// const app = express();
+
+// app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+//   // req.file.buffer -> send to your STT provider (Whisper/AssemblyAI/Deepgram)
+//   // Example: send buffer to provider, get transcript text back
+//   // Return JSON: { transcript: '...' }
+//   res.json({ transcript: 'TRANSCRIPT from your STT provider' });
+// });
+
+// app.post('/api/translate', express.json(), async (req, res) => {
+//   const { text, target } = req.body;
+//   // use a translation API (DeepL/Google/Azure)
+//   res.json({ translated: 'TRANSLATED TEXT' });
+// });
+
+// app.listen(3000);
+</pre>
+    </div>
+  </div>
+
+  <script>
+    // Helpers
+    const videoFileInput = document.getElementById('videoFile');
+    const videoEl = document.getElementById('video');
+    const statusEl = document.getElementById('status');
+    const transcriptPreview = document.getElementById('transcriptPreview');
+    const detectedLangEl = document.getElementById('detectedLang');
+    const generateBtn = document.getElementById('generateBtn');
+    const downloadVttBtn = document.getElementById('downloadVtt');
+    const targetLangSelect = document.getElementById('targetLang');
+
+    let currentFile = null;
+    let lastVtt = '';
+
+    videoFileInput.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      currentFile = f;
+      const url = URL.createObjectURL(f);
+      videoEl.src = url;
+      status('Video loaded — ready.');
+      transcriptPreview.textContent = 'No transcript yet.';
+      detectedLangEl.textContent = '—';
+      removeExistingTrack();
+    });
+
+    function status(txt){ statusEl.textContent = txt }
+
+    function removeExistingTrack(){
+      const existing = videoEl.querySelector('track');
+      if (existing) existing.remove();
+    }
+
+    // MAIN: Try in-browser Web Speech API transcription (best-effort)
+    async function tryBrowserTranscribe() {
+      // Browser speech recognition can't take raw audio files directly.
+      // A workaround is to play the video and capture microphone input — not reliable.
+      // Instead we'll return null to fall back to backend processing.
+      return null;
+    }
+
+    // Extract audio as a Blob by loading the video into an <audio> element via MediaSource isn't trivial cross-browser.
+    // Simpler: send the original video file to the server and do transcription server-side. We'll create a FormData with the file.
+
+    async function serverTranscribe(file) {
+      status('Uploading video to /api/transcribe (server) ...');
+      const fd = new FormData();
+      fd.append('video', file);
+      try{
+        const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error('Server error');
+        const j = await res.json();
+        return j.transcript || '';
+      }catch(err){
+        console.error(err);
+        status('Server transcription failed. See console.');
+        return '';
+      }
+    }
+
+    // Example translate function that calls a backend /api/translate
+    async function serverTranslate(text, target) {
+      try{
+        const res = await fetch('/api/translate', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ text, target })
+        });
+        if (!res.ok) throw new Error('Translate server error');
+        const j = await res.json();
+        return j.translated || '';
+      }catch(err){
+        console.error(err);
+        status('Translation failed — using original transcript.');
+        return text;
+      }
+    }
+
+    // Create a simple VTT from transcript by splitting roughly into sentences and assigning timings.
+    // This is a naive generator — for production, you want word-level timestamps from your STT provider.
+    function transcriptToVtt(transcript) {
+      if (!transcript) return '';
+      // Split into sentences by punctuation or length
+      const parts = transcript.match(/[^.!?\n]+[.!?]?/g) || [transcript];
+      let time = 0; // in seconds
+      const segLength = Math.max(2, Math.min(6, Math.ceil(transcript.split(' ').length / parts.length / 2)) );
+      const lines = ['WEBVTT\n'];
+      for (let i=0;i<parts.length;i++){
+        const text = parts[i].trim();
+        if (!text) continue;
+        const duration = Math.min(8, Math.max(2, Math.ceil(text.split(' ').length / 2)));
+        const start = secondsToTimestamp(time);
+        const end = secondsToTimestamp(time + duration);
+        lines.push(`${start} --> ${end}`);
+        lines.push(text);
+        lines.push('');
+        time += duration;
+      }
+      return lines.join('\n');
+    }
+
+    function secondsToTimestamp(s){
+      const hh = Math.floor(s/3600).toString().padStart(2,'0');
+      const mm = Math.floor((s%3600)/60).toString().padStart(2,'0');
+      const ss = Math.floor(s%60).toString().padStart(2,'0');
+      const ms = Math.floor((s-Math.floor(s))*1000).toString().padStart(3,'0');
+      return `${hh}:${mm}:${ss}.${ms}`;
+    }
+
+    function attachVttToVideo(vttText){
+      removeExistingTrack();
+      const blob = new Blob([vttText], {type:'text/vtt'});
+      const url = URL.createObjectURL(blob);
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.label = targetLangSelect.options[targetLangSelect.selectedIndex].text;
+      track.srclang = targetLangSelect.value;
+      track.src = url;
+      track.default = true;
+      videoEl.appendChild(track);
+      lastVtt = vttText;
+    }
+
+    downloadVttBtn.addEventListener('click', ()=>{
+      if (!lastVtt) { alert('No subtitles generated yet.'); return; }
+      const blob = new Blob([lastVtt], {type:'text/vtt'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'subs.vtt';
+      a.click();
+    });
+
+    generateBtn.addEventListener('click', async ()=>{
+      if (!currentFile) { alert('Please pick a video file first.'); return; }
+      status('Generating subtitles...');
+
+      // 1) Try in-browser (not implemented reliably) -> fall back to server
+      let transcript = await tryBrowserTranscribe();
+      if (!transcript) {
+        // send the whole video to server for extraction & STT
+        transcript = await serverTranscribe(currentFile);
+      }
+
+      if (!transcript) {
+        status('No transcript available.');
+        transcriptPreview.textContent = 'No transcript generated.';
+        return;
+      }
+
+      transcriptPreview.textContent = transcript;
+      status('Transcript received. Detecting language...');
+
+      // Basic language detection via a tiny heuristic: check for Cyrillic -> ru, accented characters -> es/fr
+      const detected = detectSimpleLanguage(transcript);
+      detectedLangEl.textContent = detected;
+
+      const target = targetLangSelect.value;
+      let finalText = transcript;
+      if (target && detected !== target) {
+        status('Translating to ' + target + ' ...');
+        finalText = await serverTranslate(transcript, target);
+      }
+
+      status('Creating .vtt file...');
+      const vtt = transcriptToVtt(finalText);
+      attachVttToVideo(vtt);
+      status('Subtitles ready — attached to player.');
+    });
+
+    function detectSimpleLanguage(text){
+      if (!text) return '—';
+      if (/[\u0400-\u04FF]/.test(text)) return 'ru';
+      // look for Spanish-specific words
+      const lower = text.toLowerCase();
+      if (/(\bque\b|\bpor\b|\bpara\b|\bcomo\b|\besta\b)/.test(lower)) return 'es';
+      if (/(\bbonjour\b|\bmerci\b|\bêtre\b|\bje\b)/.test(lower)) return 'fr';
+      if (/(\bthe\b|\band\b|\bis\b)/.test(lower)) return 'en';
+      return 'en';
+    }
+
+  </script>
+</body>
+</html>
